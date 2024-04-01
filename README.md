@@ -63,9 +63,7 @@ Our implementation, compared to ordinary RL, will consume a single additional pa
 Sketch of the idea: consider the loss $\mathcal{L} = \mathcal{L}(\tau_1, \ldots, \tau_n)$.
 We store $\frac{\partial \mathcal{L}}{\partial \tau_i}$ and, with $m$ going from $n$ to $1$, update them as follows:
 
-$
-\frac{\partial \mathcal{L}}{\partial \tau_i} \leftarrow  \frac{\partial \mathcal{L}}{\partial \tau_i} + \frac{\partial \mathcal{L}}{\partial \tau_m} \frac{\partial \tau_m(\tau_1, \ldots, \tau_{m-1})}{\partial \tau_i} \qquad \forall i \in [1, m-1]
-$
+$\frac{\partial \mathcal{L}}{\partial \tau_i} \leftarrow  \frac{\partial \mathcal{L}}{\partial \tau_i} + \frac{\partial \mathcal{L}}{\partial \tau_m} \frac{\partial \tau_m(\tau_1, \ldots, \tau_{m-1})}{\partial \tau_i} \qquad \forall i \in [1, m-1]$
 
 
 recomputing $\tau_m(\tau_1, \ldots, \tau_{m-1})$ at each step.
