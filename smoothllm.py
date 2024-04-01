@@ -21,15 +21,16 @@ def set_determininsm(seed : int) -> None:
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
 
-def save_random_state(device):
+def save_random_state(device) -> dict:
    res = {}
    res["torch"] = torch.get_rng_state()
    if device.type == "cuda":
       res[torch.cuda.get_device_name(device)] = torch.cuda.get_rng_state(device)
    res["np"] = np.random.get_state()
    res["random"] = random.getstate()
+   return res
 
-def load_random_state(res, device):
+def load_random_state(res, device) -> None:
 #    if not res:
 #       return
    torch.set_rng_state(res["torch"])
@@ -154,7 +155,7 @@ def update_banned_toks(
         if (seq_length >= no_repeat_ngram_size):
             cur_ngram_prefix = tuple(input_toks[-no_repeat_ngram_size + 1:].cpu().tolist())
             cur_banned = forbidden_toks_d.get(cur_ngram_prefix, [])
-            cur_banned.append(input_tok)
+            cur_banned.append(input_tok.item())
             forbidden_toks_d[cur_ngram_prefix] = cur_banned
             res_d[batch_idx] =  forbidden_toks_d
     return res_d
@@ -188,6 +189,24 @@ class SmoothGenerationConfig():
 
    def __init__(self):
       pass
+   
+   def print_config(self):
+        """
+        Print the configuration settings.
+        """
+        print("Configuration settings:")
+        print(f"use_kv_cache: {self.use_kv_cache}")
+        print(f"is_initial: {self.is_initial}")
+        print(f"random_state: {self.random_state}")
+        print(f"eos_token_id: {self.eos_token_id}")
+        print(f"ban_repeat_ngrams: {self.ban_repeat_ngrams}")
+        print(f"no_repeat_ngram_size: {self.no_repeat_ngram_size}")
+        print(f"banned_ngram_dict: {self.banned_ngram_dict}")
+        print(f"topk: {self.topk}")
+        print(f"logits_to_probs: {self.logits_to_probs}")
+        print(f"do_hard_rounding: {self.do_hard_rounding}")
+        print(f"do_sampling: {self.do_sampling}")
+        print(f"sampling_fudge_factor: {self.sampling_fudge_factor}")
 
 class SmoothGenerationOutput():
   model : torch.nn.Module
@@ -346,7 +365,7 @@ class SmoothLoss():
         load_random_state(parameters[i].random_state, toks.device)
 
         # re-generate the output
-        newtok, newprobs, _ = self.model_output.model.forward(cur_toks, cur_tokprobs, self.model_output.choose_tok, parameters[i])
+        newtok, newprobs, _ = self.model_output.model.forward(cur_toks, cur_tokprobs, parameters[i])
 
         # check that the re-generated output is the same
         if not torch.equal(newtok, toks[:, i, :]):
