@@ -39,7 +39,7 @@ This obviously does not work: the entropy of $\tau_i$ explodes. To correct for e
 #### Possible smooth text generation
 0. $[\tau_1, \ldots, \tau_n] = [t_1, \ldots t_n] = \text{tokenizer}(str)$
 1. $p_i = \text{model.forward}([\text{emb}(\tau_1), \ldots, \text{emb}(\tau_n)])$
-2. $p_i = \text{entropy\_normalize}(p_i)$
+2. $p_i = \text{entropynormalize}(p_i)$
 3. $\tau_{n+1} = \text{topk}(\text{sorted}([(t_1, p_1), (t_2, p_2), \ldots]))$
 4. $goto \; 1$
 
@@ -62,9 +62,12 @@ Our implementation, compared to ordinary RL, will consume a single additional pa
 
 Sketch of the idea: consider the loss $\mathcal{L} = \mathcal{L}(\tau_1, \ldots, \tau_n)$.
 We store $\frac{\partial \mathcal{L}}{\partial \tau_i}$ and, with $m$ going from $n$ to $1$, update them as follows:
-$$
+
+$
 \frac{\partial \mathcal{L}}{\partial \tau_i} \leftarrow  \frac{\partial \mathcal{L}}{\partial \tau_i} + \frac{\partial \mathcal{L}}{\partial \tau_m} \frac{\partial \tau_m(\tau_1, \ldots, \tau_{m-1})}{\partial \tau_i} \qquad \forall i \in [1, m-1]
-$$
+$
+
+
 recomputing $\tau_m(\tau_1, \ldots, \tau_{m-1})$ at each step.
 
 #### Gradient explosion:
