@@ -45,6 +45,9 @@ This obviously does not work: the entropy of $\tau_i$ explodes. To correct for e
 
 We can use the gumbel-softmax trick to simulate sampling.
 
+In order to extract traditional text, we either take the top
+In case where the text is then fed into another model, we take the natural embedding of these generalized tokens with respect to the 
+
 ### Use-cases
 
 - Consider any reinforcement learning problem with explicit reward functions, for example, the second part of RLHF, or BLEU fitting. Notice that the task is fully differentiable, this means we can compute gradients directly, without resorting to the log-derivative trick, with approx-zero overhead
