@@ -4,10 +4,10 @@ import torch
 import torch.nn.functional as F
 import copy
 import warnings
-from typing import Tuple, List
+from typing import Tuple, List, Union
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-
+from gptneo_decompose import GradmodGPTNeoAttn, UngradmodGPTNeoAttn
 
 def set_determininsm(seed : int) -> None:
     """
@@ -110,18 +110,17 @@ def ban_repeat_ngrams(
     return banned_tokens
 
 class SmoothGenerationConfig():
-   use_kv_cache = False
+   use_kv_cache = True
    eos_token_id = 0
 
    ban_repeat_ngrams = True
    no_repeat_ngram_size = 6
 
    topk = 5
-   logits_to_probs = lambda _, x : maxprob_bounded_softmax(x, minimal_maxprob=0.7, temperature_step_factor=1.1)
    do_hard_rounding = False
 
    do_sampling = True
-   sampling_fudge_factor = 0.
+   sampling_temp = 0.
    entropy_bound = 1.
 
    def __init__(self):
@@ -140,12 +139,13 @@ class SmoothGenerationConfig():
         print(f"logits_to_probs: {self.logits_to_probs}")
         print(f"do_hard_rounding: {self.do_hard_rounding}")
         print(f"do_sampling: {self.do_sampling}")
-        print(f"sampling_fudge_factor: {self.sampling_fudge_factor}")
+        print(f"sampling_temp: {self.sampling_temp}")
 
 class SmoothGenerationOutput():
   model : torch.nn.Module
   toks : torch.LongTensor
   tokprobs : torch.Tensor
+  kv_cache : Union[None, torch.Tensor]
   saved_states : List[Tuple]
   config : SmoothGenerationConfig
   generation_start_idx : int
@@ -169,22 +169,37 @@ class SmoothModelForCausalLM(torch.nn.Module):
     self.model = model
     self.embedding_matrix = embedding_matrix
 
-  def call_model(self, toks, tokprobs):
-    emb = (self.embedding_matrix[toks] * tokprobs.unsqueeze(-1)).sum(axis=-2)
-    return self.model(inputs_embeds = emb)
+  def call_model(self, toks, tokprobs, use_cache=False, past_key_values=None):
+    if use_cache:
+        if past_key_values is None:
+           emb = (self.embedding_matrix[toks] * tokprobs.unsqueeze(-1)).sum(axis=-2)
+        else:
+           emb = (self.embedding_matrix[toks[:,-1,:]] * tokprobs[:,-1,:].unsqueeze(-1)).sum(axis=-2)
+        return self.model(inputs_embeds = emb, use_cache=True, past_key_values=past_key_values)
+    else:
+        emb = (self.embedding_matrix[toks] * tokprobs.unsqueeze(-1)).sum(axis=-2)
+        res = self.model(inputs_embeds = emb)
+        res.past_key_values = None
+        return res
   
-  def forward(self, toks : torch.LongTensor, tokprobs : torch.Tensor, config : SmoothGenerationConfig):
+  def forward(self, toks : torch.LongTensor, tokprobs : torch.Tensor, config : SmoothGenerationConfig, past_key_values = None):
     saved_state = ()
     # Generate
-    logits = self.call_model(toks, tokprobs).logits[:, -1, :]
+    output = self.call_model(toks, tokprobs, use_cache=config.use_kv_cache, past_key_values=past_key_values)
+    if past_key_values is None:
+      logits = output.logits[:,-1,:]
+    else:
+      logits = output.logits[:,:]
+    kv_cache = output.past_key_values
+
     # add Gumbel(0,1) divided by the fudge factor
     if config.do_sampling:
-      logits += torch.distributions.Gumbel(0,1).sample(logits.shape).to(logits.device) * config.sampling_fudge_factor
+      logits += torch.distributions.Gumbel(0,1).sample(logits.shape).to(logits.device) * config.sampling_temp
 
     if config.ban_repeat_ngrams:
         banned_tokens = ban_repeat_ngrams(toks[:, :, 0], config.no_repeat_ngram_size)
         for batch_idx, banned in enumerate(banned_tokens):
-            logits[batch_idx, banned] = -1000
+            logits[batch_idx, banned] = float('-inf')
         # saved_state = saved_state + (banned_tokens, )
         
     
@@ -197,9 +212,9 @@ class SmoothModelForCausalLM(torch.nn.Module):
     if config.do_hard_rounding:
        hard_rounded = torch.zeros_like(top_probs, device=top_probs.device)
        hard_rounded[:, 0] = 1.
-       top_probs = hard_rounded - top_probs.detach() + top_probs
+       top_probs = hard_rounded - top_probs.detach() + top_probs  
 
-    return top_tok, top_probs, saved_state
+    return top_tok, top_probs, saved_state, kv_cache
 
   def generalize_tokens(self, toks, topk):
     """
@@ -225,6 +240,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
       toks, tokprobs = input_tokens
     else:
       toks, tokprobs = self.generalize_tokens(input_tokens, config.topk)
+    cache = None
 
     # config.random_state = save_random_state(input_tokens.device)
 
@@ -237,13 +253,14 @@ class SmoothModelForCausalLM(torch.nn.Module):
         saved_random_state = save_random_state(toks.device)
         
         # Generate one step
-        newtok, newprobs, new_saved_states = self.forward(toks, tokprobs, config)
+        newtok, newprobs, new_saved_states, new_cache = self.forward(toks, tokprobs, config, cache)
         max_tok = newtok[:, 0]
 
         # save & update
         saved_states.append((saved_random_state,) + new_saved_states)
         toks = torch.cat((toks, newtok.unsqueeze(1)), dim=1)
         tokprobs = torch.cat((tokprobs, newprobs.unsqueeze(1)), dim=1)
+        cache = new_cache
         if (max_tok == config.eos_token_id):
           break
 
@@ -254,6 +271,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
     res.saved_states = saved_states
     res.config = config
     res.generation_start_idx = init_len
+    res.kv_cache = cache
     return res
   
 
@@ -280,6 +298,7 @@ class SmoothLoss():
       toks = self.model_output.toks
       tokprobs = self.model_output.tokprobs
       config = self.model_output.config
+      kv_cache = self.model_output.kv_cache
 
       # compute (∂𝓛/∂τ_i)
       # we store the intermediate grads in tokprobs
@@ -287,6 +306,18 @@ class SmoothLoss():
       loss_val = self.loss(toks, tokprobs)
       loss_val.backward()
       init_grad = tokprobs.grad.clone().detach()
+
+      # store the grads in the kv_cache
+      if config.use_kv_cache:
+         for kv in kv_cache:
+            kv[0].requires_grad_(True)
+            kv[1].requires_grad_(True)
+
+      regen_kv_cache = []
+      for kv in kv_cache:
+          regen_kv_cache.append([torch.zeros_like(kv[0][:,:,-1:,:]), torch.zeros_like(kv[1][:,:,-1:,:])])
+      
+      GradmodGPTNeoAttn(model.model, regen_kv_cache)
 
       # compute the range
       batch_size, toks_len, topk = toks.shape
@@ -296,24 +327,36 @@ class SmoothLoss():
       for i in reversed(range(init_len, toks_len - 1)):
         cur_toks = toks[:, :i, :]
         cur_tokprobs = tokprobs[:, :i, :]
+        cur_kv_cache = ()
+        for kv, regen_kv in zip(kv_cache, regen_kv_cache):
+            cur_kv_cache = cur_kv_cache + ((kv[0][:, :, :(i-1), :], kv[1][:, :, :(i-1), :]), )
+            if kv[0].grad is None:
+               pass
+            else:
+               regen_kv[0].copy_(kv[0].grad[:,:,(i-1):i,:])
+               regen_kv[1].copy_(kv[1].grad[:,:,(i-1):i,:])
+
 
         # restore the original random state for reproducibility
         load_random_state(saved_states[i - init_len][0], toks.device)
 
         # re-generate the output
-        newtok, newprobs, _ = self.model_output.model.forward(cur_toks, cur_tokprobs, config)
+        newtok, newprobs, _, _ = model.forward(cur_toks, cur_tokprobs, config, cur_kv_cache)
 
         # check that the re-generated output is the same
         if not torch.equal(newtok, toks[:, i, :]):
           print(f"At position {i}")
           print("Re-generated tokens:", newtok, newprobs)
           print("Original tokens:", toks[:, i, :], tokprobs[:, i, :])
+          print("These must be equal")
         assert torch.equal(newtok, toks[:, i, :])
 
         # propagate the gradients
         last_grad = tokprobs.grad[:, i, :]
         newprobs.backward(last_grad)
 
+      UngradmodGPTNeoAttn(model.model)
+      print(kv_cache[0][0].grad.shape)
       tokprobs.requires_grad_(False)
 
 
