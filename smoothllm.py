@@ -307,16 +307,19 @@ class SmoothLoss():
       loss_val.backward()
       init_grad = tokprobs.grad.clone().detach()
 
-      # store the grads in the kv_cache
+      # enable storing the grads in the kv_cache
       if config.use_kv_cache:
          for kv in kv_cache:
             kv[0].requires_grad_(True)
             kv[1].requires_grad_(True)
 
-      regen_kv_cache = []
-      for kv in kv_cache:
-          regen_kv_cache.append([torch.zeros_like(kv[0][:,:,-1:,:]), torch.zeros_like(kv[1][:,:,-1:,:])])
-      
+          # storage for passing the cached KV-cache gradients to the modded backprop
+         regen_kv_cache = []
+         for kv in kv_cache:
+            regen_kv_cache.append([torch.zeros_like(kv[0][:,:,-1:,:]), torch.zeros_like(kv[1][:,:,-1:,:])])
+        
+      # add hooks for passing the stored kV-cache gradients
+      # hooks, when passing through the attention layer, take the gradients from the storage and add them into the backprop flow
       GradmodGPTNeoAttn(model.model, regen_kv_cache)
 
       # compute the range
@@ -325,16 +328,21 @@ class SmoothLoss():
 
       # update ∂𝓛/∂τ_j ← ∂𝓛/∂τ_j + ∂τ_i(τ_1 … τ_i-1)/∂τ_j for all j < i
       for i in reversed(range(init_len, toks_len - 1)):
+        print(i)
         cur_toks = toks[:, :i, :]
         cur_tokprobs = tokprobs[:, :i, :]
+
+        # recall the cache at time i
         cur_kv_cache = ()
-        for kv, regen_kv in zip(kv_cache, regen_kv_cache):
-            cur_kv_cache = cur_kv_cache + ((kv[0][:, :, :(i-1), :], kv[1][:, :, :(i-1), :]), )
-            if kv[0].grad is None:
-               pass
-            else:
-               regen_kv[0].copy_(kv[0].grad[:,:,(i-1):i,:])
-               regen_kv[1].copy_(kv[1].grad[:,:,(i-1):i,:])
+        if config.use_kv_cache:
+          for kv, regen_kv in zip(kv_cache, regen_kv_cache):
+              cur_kv_cache = cur_kv_cache + ((kv[0][:, :, :(i-1), :], kv[1][:, :, :(i-1), :]), )
+              if kv[0].grad is None:
+                pass
+              else:
+                # push the gradients of the final part of the KV-cache into the backprop-storage
+                regen_kv[0].copy_(kv[0].grad[:,:,(i-1):i,:])
+                regen_kv[1].copy_(kv[1].grad[:,:,(i-1):i,:])
 
 
         # restore the original random state for reproducibility
@@ -355,9 +363,11 @@ class SmoothLoss():
         last_grad = tokprobs.grad[:, i, :]
         newprobs.backward(last_grad)
 
+      # remove the hooks
       UngradmodGPTNeoAttn(model.model)
-      print(kv_cache[0][0].grad.shape)
-      tokprobs.requires_grad_(False)
+      # tokprobs.requires_grad_(False)
+
+      return kv_cache, tokprobs
 
 
   def __init__(self, loss):

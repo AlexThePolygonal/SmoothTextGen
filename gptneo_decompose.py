@@ -6,6 +6,7 @@ from typing import List, Tuple, Union, Dict, Callable
 import warnings
 import copy
 
+# Add the gradients taken by the hook and add it into the flow
 class GradMod(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input, hook):
@@ -15,7 +16,8 @@ class GradMod(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output + ctx.hook(grad_output), None
+        temp = ctx.hook(grad_output)
+        return grad_output + temp, None
 
 class GradModded(nn.Module):
     base_layer : nn.Module
@@ -32,17 +34,15 @@ class GradModded(nn.Module):
         return self.gradmod.apply(self.base_layer(input), self.hook)
 
 # TODO fix this crap
-# TODO remove debugging and attach proper hooks
 def GradmodGPTNeoAttn(model, target_kv_cache):
     warnings.warn("I have absolutely no idea whether it works on other models. Take care")
-    
-    
+
     for module, kv in zip(model.transformer.h, target_kv_cache):
+        # make a hook injecting gradients from target_kv_cache into the attention operators
         attn_module = module.attn.attention
         hd = attn_module.head_dim
         nh = attn_module.num_heads
 
-        # k_hook = lambda x, nh=nh, hd=hd : print(attn_module._split_heads(x,nh,hd).shape)
         k_hook = lambda _, nh=nh, hd=hd :\
             attn_module._merge_heads(kv[0],nh,hd)
         
