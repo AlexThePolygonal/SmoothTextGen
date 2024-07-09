@@ -6,6 +6,7 @@ from typing import List, Tuple, Union, Dict, Callable
 import warnings
 import copy
 
+
 # Add the gradients taken by the hook and add it into the flow
 class GradMod(torch.autograd.Function):
     @staticmethod
@@ -19,19 +20,21 @@ class GradMod(torch.autograd.Function):
         temp = ctx.hook(grad_output)
         return grad_output + temp, None
 
-class GradModded(nn.Module):
-    base_layer : nn.Module
-    gradmod : GradMod
-    hook : Callable
 
-    def __init__(self, base : nn.Module, hook : Callable):
+class GradModded(nn.Module):
+    base_layer: nn.Module
+    gradmod: GradMod
+    hook: Callable
+
+    def __init__(self, base: nn.Module, hook: Callable):
         super().__init__()
         self.base_layer = base
         self.gradmod = GradMod()
         self.hook = hook
-    
-    def forward(self, input : torch.Tensor) -> torch.Tensor:
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         return self.gradmod.apply(self.base_layer(input), self.hook)
+
 
 def GradmodGPTNeoAttn(model, target_kv_cache):
     # warnings.warn("I have absolutely no idea whether it works on other models. Take care")
@@ -42,16 +45,15 @@ def GradmodGPTNeoAttn(model, target_kv_cache):
         hd = attn_module.head_dim
         nh = attn_module.num_heads
 
-        k_hook = lambda _, nh=nh, hd=hd :\
-            attn_module._merge_heads(kv[0],nh,hd)
-        
+        k_hook = lambda _, nh=nh, hd=hd: attn_module._merge_heads(kv[0], nh, hd)
+
         module.attn.attention.k_proj = GradModded(module.attn.attention.k_proj, k_hook)
-        
-        v_hook = lambda _, nh=nh, hd=hd :\
-            attn_module._merge_heads(kv[1],nh,hd)
+
+        v_hook = lambda _, nh=nh, hd=hd: attn_module._merge_heads(kv[1], nh, hd)
         module.attn.attention.v_proj = GradModded(module.attn.attention.v_proj, v_hook)
-    
+
     return model
+
 
 def UngradmodGPTNeoAttn(model):
     for module in model.transformer.h:
