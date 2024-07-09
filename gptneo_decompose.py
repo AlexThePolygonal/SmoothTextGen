@@ -33,9 +33,8 @@ class GradModded(nn.Module):
     def forward(self, input : torch.Tensor) -> torch.Tensor:
         return self.gradmod.apply(self.base_layer(input), self.hook)
 
-# TODO fix this crap
 def GradmodGPTNeoAttn(model, target_kv_cache):
-    warnings.warn("I have absolutely no idea whether it works on other models. Take care")
+    # warnings.warn("I have absolutely no idea whether it works on other models. Take care")
 
     for module, kv in zip(model.transformer.h, target_kv_cache):
         # make a hook injecting gradients from target_kv_cache into the attention operators

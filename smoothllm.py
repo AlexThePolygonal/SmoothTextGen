@@ -4,10 +4,10 @@ import torch
 import torch.nn.functional as F
 import copy
 import warnings
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Callable
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-from gptneo_decompose import GradmodGPTNeoAttn, UngradmodGPTNeoAttn
+from copy import deepcopy
 
 def set_determininsm(seed : int) -> None:
     """
@@ -113,7 +113,7 @@ class SmoothGenerationConfig():
    use_kv_cache = True
    eos_token_id = 0
 
-   ban_repeat_ngrams = True
+   ban_repeat_ngrams = False
    no_repeat_ngram_size = 6
 
    topk = 5
@@ -157,8 +157,10 @@ class SmoothModelForCausalLM(torch.nn.Module):
   """
   model : AutoModelForCausalLM
   embedding_matrix : torch.Tensor
+  model_modder : Callable
+  model_unmodder : Callable
 
-  def __init__(self, model, embedding_matrix):
+  def __init__(self, model, embedding_matrix, model_modder, model_unmodder):
     """
     Transform a model into a smooth model
 
@@ -168,6 +170,8 @@ class SmoothModelForCausalLM(torch.nn.Module):
     super().__init__()
     self.model = model
     self.embedding_matrix = embedding_matrix
+    self.model_modder = model_modder
+    self.model_unmodder = model_unmodder
 
   def call_model(self, toks, tokprobs, use_cache=False, past_key_values=None):
     if use_cache:
@@ -221,7 +225,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
     Transforms a tensor of tokens into a a tensor of generalized tokens
     """
     device = toks.device
-    input_ids = toks
+    input_ids = toks.clone()
     input_probs = torch.ones_like(input_ids, dtype=torch.zeros(1).dtype, device=device)
 
     other_ids = torch.zeros(input_ids.shape + (topk - 1,), dtype = input_ids.dtype, device=device)
@@ -269,7 +273,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
     res.toks = toks
     res.tokprobs = tokprobs
     res.saved_states = saved_states
-    res.config = config
+    res.config = deepcopy(config)
     res.generation_start_idx = init_len
     res.kv_cache = cache
     return res
@@ -320,7 +324,7 @@ class SmoothLoss():
         
       # add hooks for passing the stored kV-cache gradients
       # hooks, when passing through the attention layer, take the gradients from the storage and add them into the backprop flow
-      GradmodGPTNeoAttn(model.model, regen_kv_cache)
+      model.model.model_modder(model.model, regen_kv_cache)
 
       # compute the range
       batch_size, toks_len, topk = toks.shape
@@ -363,8 +367,8 @@ class SmoothLoss():
         last_grad = tokprobs.grad[:, i, :]
         newprobs.backward(last_grad)
 
-      # remove the hooks
-      UngradmodGPTNeoAttn(model.model)
+      # remove the hooks and unset the gradients
+      model.model.model_modder(model.model)
       # tokprobs.requires_grad_(False)
 
       return kv_cache, tokprobs
