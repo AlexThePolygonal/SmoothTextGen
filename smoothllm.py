@@ -191,6 +191,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
         self.embedding_matrix = embedding_matrix
         self.model_modder = model_modder
         self.model_unmodder = model_unmodder
+        self.embs = None
 
     def call_model(self, toks, tokprobs, use_cache=False, past_key_values=None):
         if use_cache:
@@ -325,6 +326,8 @@ class SmoothModelForCausalLM(torch.nn.Module):
         res.config = deepcopy(config)
         res.generation_start_idx = init_len
         res.kv_cache = cache
+        res.embs = self.embs
+        self.embs = None
         return res
 
 
@@ -342,7 +345,7 @@ class SmoothLoss:
         def value(self):
             return self.loss(self.model_output.toks, self.model_output.tokprobs).item()
 
-        def backwards(self):
+        def backwards(self, do_debug=False):
             """
             The key function of this project, efficient backprop for stacked models
             """
@@ -386,7 +389,6 @@ class SmoothLoss:
 
             # update ∂𝓛/∂τ_j ← ∂𝓛/∂τ_j + ∂τ_i(τ_1 … τ_i-1)/∂τ_j for all j < i
             for i in reversed(range(init_len, toks_len - 1)):
-                print(i)
                 cur_toks = toks[:, :i, :]
                 cur_tokprobs = tokprobs[:, :i, :]
 
@@ -425,10 +427,15 @@ class SmoothLoss:
                 newprobs.backward(last_grad)
 
             # remove the hooks and unset the gradients
-            model.model.model_modder(model.model)
-            # tokprobs.requires_grad_(False)
+            model.model.model_unmodder(model.model)
 
-            return kv_cache, tokprobs
+            if do_debug:
+                return kv_cache
+
+            tokprobs.requires_grad_(False)
+            for kv in kv_cache:
+                kv[0].requires_grad_(False)
+                kv[1].requires_grad_(False)
 
     def __init__(self, loss):
         super().__init__()
