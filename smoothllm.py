@@ -12,12 +12,15 @@ from tqdm import tqdm
 
 
 def total_grad(model):
+    """
+    Get the total gradient of all the free parameters of the model
+    """
     return torch.cat([torch.flatten(p) for p in model.parameters() if p.requires_grad]).view(-1,1)
 
 
 def set_determininsm(seed: int) -> None:
     """
-    Set deterministic execution of all libraries used in this proj
+    Set deterministic execution for all libraries used in this project
     """
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -28,7 +31,10 @@ def set_determininsm(seed: int) -> None:
     torch.use_deterministic_algorithms(True)
 
 
-def save_random_state(device) -> dict:
+def save_random_state(device : torch.device) -> dict:
+    """
+    Save the random state to ensure perfect reproducibility
+    """
     res = {}
     res["torch"] = torch.get_rng_state()
     if device.type == "cuda":
@@ -38,11 +44,13 @@ def save_random_state(device) -> dict:
     return res
 
 
-def load_random_state(res, device) -> None:
+def load_random_state(res : dict, device : torch.device) -> None:
+    """
+    Load the random state to exactly recompute the previous results
+    """
     torch.set_rng_state(res["torch"])
     if device.type == "cuda":
         torch.cuda.set_rng_state(res[torch.cuda.get_device_name(device)], device)
-        # res[torch.cuda.get_device_name(device)] = torch.cuda.set_rng_state(device)
     np.random.set_state(res["np"])
     random.setstate(res["random"])
 
@@ -132,50 +140,78 @@ def ban_repeat_ngrams(
 
 
 class SmoothGenerationConfig:
-    use_kv_cache = True
-    eos_token_id = 0
+    def __init__(
+        self,
+        use_kv_cache : bool = True,
+        eos_token_id : int = 0,
+        ban_repeat_ngrams : bool =False,
+        no_repeat_ngram_size : int =6, 
+        topk : int =5,
+        do_hard_rounding : bool =False,
+        do_sample : bool =True,
+        temperature : float =0.0,
+        entropy_bound : float=1.0,
+        do_clip_norms : bool =True,
+        clip_norm : float = 1.,
+    ):
+        self.use_kv_cache = use_kv_cache
+        self.eos_token_id = eos_token_id
+        self.ban_repeat_ngrams = ban_repeat_ngrams
+        self.no_repeat_ngram_size = no_repeat_ngram_size
+        self.topk = topk
+        self.do_hard_rounding = do_hard_rounding
+        self.do_sample = do_sample
+        self.temperature = temperature
+        self.entropy_bound = entropy_bound
+        self.do_clip_norms = do_clip_norms
+        self.clip_norm = clip_norm
 
-    ban_repeat_ngrams = False
-    no_repeat_ngram_size = 6
-
-    topk = 5
-    do_hard_rounding = False
-
-    do_sample = True
-    temperature = 0.0
-    entropy_bound = 1.0
-    
-    do_clip_norms = True
-    clip_norm = 5
-
-    def __init__(self):
-        pass
-
-    def print_config(self):
-        """
-        Print the configuration settings.
-        """
-        print("Configuration settings:")
-        print(f"use_kv_cache: {self.use_kv_cache}")
-        print(f"eos_token_id: {self.eos_token_id}")
-        print(f"ban_repeat_ngrams: {self.ban_repeat_ngrams}")
-        print(f"no_repeat_ngram_size: {self.no_repeat_ngram_size}")
-        print(f"topk: {self.topk}")
-        print(f"logits_to_probs: {self.logits_to_probs}")
-        print(f"do_hard_rounding: {self.do_hard_rounding}")
-        print(f"do_sampling: {self.do_sample}")
-        print(f"sampling_temp: {self.sampling_temp}")
-
+    def __repr__(self):
+        return (
+            f"SmoothGenerationConfig("
+            f"use_kv_cache={self.use_kv_cache}, "
+            f"eos_token_id={self.eos_token_id}, "
+            f"ban_repeat_ngrams={self.ban_repeat_ngrams}, "
+            f"no_repeat_ngram_size={self.no_repeat_ngram_size}, "
+            f"topk={self.topk}, "
+            f"do_hard_rounding={self.do_hard_rounding}, "
+            f"do_sample={self.do_sample}, "
+            f"temperature={self.temperature}, "
+            f"entropy_bound={self.entropy_bound}, "
+            f"do_clip_norms={self.do_clip_norms}, "
+            f"clip_norm={self.clip_norm})"
+        )
 
 class SmoothGenerationOutput:
-    model: torch.nn.Module
-    toks: torch.LongTensor
-    tokprobs: torch.Tensor
-    kv_cache: Union[None, torch.Tensor]
-    saved_states: List[Tuple]
-    config: SmoothGenerationConfig
-    generation_start_idx: int
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        toks: torch.LongTensor,
+        tokprobs: torch.Tensor,
+        kv_cache: Union[None, torch.Tensor],
+        saved_states: List[Tuple],
+        config: SmoothGenerationConfig,
+        generation_start_idx: int,
+    ):
+        self.model = model
+        self.toks = toks
+        self.tokprobs = tokprobs
+        self.kv_cache = kv_cache
+        self.saved_states = saved_states
+        self.config = config
+        self.generation_start_idx = generation_start_idx
 
+    def __repr__(self):
+        return (
+            f"SmoothGenerationOutput("
+            f"model={self.model.__class__.__name__}, "
+            f"toks.shape={self.toks.shape}, "
+            f"tokprobs.shape={self.tokprobs.shape}, "
+            f"kv_cache={'None' if self.kv_cache is None else 'Tensor'}, "
+            f"saved_states_count={len(self.saved_states)}, "
+            f"config={self.config.__class__.__name__}, "
+            f"generation_start_idx={self.generation_start_idx})"
+        )
 
 class SmoothModelForCausalLM(torch.nn.Module):
     """
@@ -194,6 +230,8 @@ class SmoothModelForCausalLM(torch.nn.Module):
 
         model --- the base model
         embedding_matrix --- the embedding matrix of the base model
+        model_modder --- a function which adds the kv_cache hooks to the model
+        model_unmodder --- a function which removes the kv_cache hooks from the model
         """
         super().__init__()
         self.model = model
@@ -242,13 +280,14 @@ class SmoothModelForCausalLM(torch.nn.Module):
             logits = output.logits[:, :]
         kv_cache = output.past_key_values
 
-        # add Gumbel(0,1) divided by the fudge factor
+        # gumbel-softmax sampling trick impl
         if config.do_sample:
             logits += (
                 torch.distributions.Gumbel(0, 1).sample(logits.shape).to(logits.device)
                 * config.temperature
             )
 
+        # repeat-ngram banning
         if config.ban_repeat_ngrams:
             banned_tokens = ban_repeat_ngrams(
                 toks[:, :, 0], config.no_repeat_ngram_size
@@ -257,11 +296,12 @@ class SmoothModelForCausalLM(torch.nn.Module):
                 logits[batch_idx, banned] = float("-inf")
             # saved_state = saved_state + (banned_tokens, )
 
+        # next step computation
         top_logits, top_tok = torch.topk(logits, k=config.topk)
-
         top_logits = bound_entropy(top_logits, config.entropy_bound)
         top_probs = F.softmax(top_logits, dim=-1)
 
+        # hard rounding if necessary
         if config.do_hard_rounding:
             hard_rounded = torch.zeros_like(top_probs, device=top_probs.device)
             hard_rounded[:, 0] = 1.0
@@ -269,7 +309,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
 
         return top_tok, top_probs, saved_state, kv_cache
 
-    def generalize_tokens(self, toks, topk):
+    def generalize_tokens(self, toks : torch.LongTensor, topk : int):
         """
         Transforms a tensor of tokens into a a tensor of generalized tokens
         """
@@ -326,14 +366,9 @@ class SmoothModelForCausalLM(torch.nn.Module):
                 if max_tok == config.eos_token_id:
                     break
 
-        res = SmoothGenerationOutput()
-        res.model = self
-        res.toks = toks
-        res.tokprobs = tokprobs
-        res.saved_states = saved_states
-        res.config = deepcopy(config)
-        res.generation_start_idx = init_len
-        res.kv_cache = cache
+        res = SmoothGenerationOutput(
+            self, toks, tokprobs, cache, saved_states, deepcopy(config), init_len
+        )
         return res
 
 
@@ -351,7 +386,7 @@ class SmoothLoss:
         def value(self):
             return self.loss(self.model_output.toks, self.model_output.tokprobs).item()
 
-        def backwards(self, do_debug=False):
+        def backwards(self):
             """
             The key function of this project, efficient backprop for stacked models
             """
@@ -364,7 +399,7 @@ class SmoothLoss:
 
             # compute (∂𝓛/∂τ_i)
             # we store the intermediate grads in tokprobs
-            tokprobs.requires_grad_()
+            tokprobs.requires_grad_(True)
             loss_val = self.loss(toks, tokprobs)
             loss_val.backward()
             init_grad = tokprobs.grad.clone().detach()
@@ -433,13 +468,13 @@ class SmoothLoss:
                 if  config.do_clip_norms:
                     norm = torch.linalg.vector_norm(last_grad, dim=(1))
                     if (norm >= config.clip_norm):
-                        print(norm)
                         last_grad = last_grad / norm
                 newprobs.backward(last_grad)
 
             # remove the hooks and unset the gradients
             model.model_unmodder(model.model)
 
+            # remove gradients
             tokprobs.requires_grad_(False)
             for kv in kv_cache:
                 kv[0].requires_grad_(False)
@@ -452,6 +487,7 @@ class SmoothLoss:
     def __call__(self, output):
         return self.LossValue(output, self.loss)
 
+# estimate 𝔼𝑋 and 𝔼𝑋² by sampling from rv 𝑋
 def estimate_tensor_stats(rv, iters, seed=1337):
     set_determininsm(seed)
     e_rv = torch.zeros_like(rv()).to(dtype=torch.float64)
@@ -462,19 +498,19 @@ def estimate_tensor_stats(rv, iters, seed=1337):
         e_rv2 += rvi**2
     return e_rv / iters, e_rv2 / iters
 
+# sample the model gradient from the smooth estimator
 def smooth_seq_grad(model, loss, prompt, max_toks, config):
-    optimizer = torch.optim.SGD(model.parameters(), 1e-5)
     def run():
         output = model.generate(prompt, max_toks, config)
         loss_val = loss(output)
         loss_val.backwards()
         res = total_grad(model)
-        optimizer.zero_grad()
+        model.zero_grad()
         return res
     return run
 
+# sample the model gradient from the REINFORCE estimator
 def reinforce_grad(model, loss, prompt, max_toks, *args, **kwargs):
-    optimizer = torch.optim.SGD(model.parameters(), 1e-5)
     def run():
         toks = model.generate(prompt, max_length = max_toks, *args, **kwargs)
         reward = -loss(toks)
@@ -482,6 +518,6 @@ def reinforce_grad(model, loss, prompt, max_toks, *args, **kwargs):
         log_probas = F.log_softmax(model(toks).logits, dim=-1)[0, init_len-1:-1, toks[0, init_len:]].sum()
         log_probas.backward()
         res = total_grad(model)
-        optimizer.zero_grad()
+        model.zero_grad()
         return res * reward
     return run

@@ -6,7 +6,6 @@ from typing import List, Tuple, Union, Dict, Callable
 import warnings
 import copy
 
-
 # Add the gradients taken by the hook and add it into the flow
 class GradMod(torch.autograd.Function):
     @staticmethod
