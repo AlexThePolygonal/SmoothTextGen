@@ -5,50 +5,27 @@ from torch import nn
 from typing import List, Tuple, Union, Dict, Callable
 import warnings
 import copy
-
-# Add the gradients taken by the hook and add it into the flow
-class GradMod(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, hook):
-        ctx.hook = hook
-        return input
-
-    @torch.autograd.function.once_differentiable
-    @staticmethod
-    def backward(ctx, grad_output):
-        temp = ctx.hook(grad_output)
-        return grad_output + temp, None
+from smoothllm import GradModded
 
 
-class GradModded(nn.Module):
-    base_layer: nn.Module
-    gradmod: GradMod
-    hook: Callable
-
-    def __init__(self, base: nn.Module, hook: Callable):
-        super().__init__()
-        self.base_layer = base
-        self.gradmod = GradMod()
-        self.hook = hook
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self.gradmod.apply(self.base_layer(input), self.hook)
-
-
-def GradmodGPTNeoAttn(model, target_kv_cache):
+def GradmodGPTNeoAttn(model, kv_cache_grad_buf):
     # warnings.warn("I have absolutely no idea whether it works on other models. Take care")
 
-    for module, kv in zip(model.transformer.h, target_kv_cache):
-        # make a hook injecting gradients from target_kv_cache into the attention operators
+    for module, accumulated_kv_grad in zip(model.transformer.h, kv_cache_grad_buf):
+        # make a hook injecting gradients from target_kv_grad_cache into the attention operators
         attn_module = module.attn.attention
         hd = attn_module.head_dim
         nh = attn_module.num_heads
 
-        k_hook = lambda _, nh=nh, hd=hd: attn_module._merge_heads(kv[0], nh, hd)
+        k_hook = lambda _, nh=nh, hd=hd: attn_module._merge_heads(
+            accumulated_kv_grad[0], nh, hd
+        )
 
         module.attn.attention.k_proj = GradModded(module.attn.attention.k_proj, k_hook)
 
-        v_hook = lambda _, nh=nh, hd=hd: attn_module._merge_heads(kv[1], nh, hd)
+        v_hook = lambda _, nh=nh, hd=hd: attn_module._merge_heads(
+            accumulated_kv_grad[1], nh, hd
+        )
         module.attn.attention.v_proj = GradModded(module.attn.attention.v_proj, v_hook)
 
     return model
