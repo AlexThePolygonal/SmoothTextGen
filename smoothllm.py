@@ -294,7 +294,9 @@ class SmoothModelForCausalLM(torch.nn.Module):
             Cache
         ] = None,  # shape of cache given by the structure of the attention layers: [batch_size, num_heads, seq_len, head_dim]
     ) -> Tuple[torch.Tensor, torch.Tensor, dict, Optional[Cache]]:
-
+        
+        # call the model and obtain the logits
+        # for *reasons*, its different in every config case…
         if config.use_kv_cache:
             if past_key_values is None:
                 emb = (self.embedding_matrix[toks] * tokprobs.unsqueeze(-1)).sum(dim=-2)
@@ -396,7 +398,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
 
         saved_states = []
         init_len = toks.shape[1]
-        after_eos_mask = torch.ones((toks.shape[0], toks.shape[1] + 1), dtype=bool)
+        after_eos_mask = torch.ones((toks.shape[0], toks.shape[1] + 1), dtype=bool) # the mask which removes everything after eos
         for i in range(max_iters):
             with torch.no_grad():
                 # Save the random states
@@ -418,6 +420,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
                 tokprobs = torch.cat((tokprobs, newprobs.unsqueeze(1)), dim=1)
                 cache = new_cache
 
+                # update the mask which removes everything after eos
                 new_eos_mask = max_tok != config.eos_token_id
                 after_eos_mask = torch.cat(
                     (
@@ -489,6 +492,7 @@ class SmoothModelForCausalLM(torch.nn.Module):
                 # save & update
                 toks = torch.cat((toks, newtok.unsqueeze(1)), dim=1)
 
+                # update the mask which removes everything after eos
                 new_eos_mask = newtok != config.eos_token_id
                 after_eos_mask = torch.cat(
                     (
@@ -615,8 +619,13 @@ class SmoothLoss:
                         mask = norm >= config.clip_norm
                         last_grad = torch.where(mask, last_grad / norm, last_grad)
 
+                # TRACK THIS TO UNDERSTAND GRADIENT EXPLOSION
+                # this is the gradient of the i-th token, which is being backpropagated
+                # essentially the i-th state in an RNN
                 if config.debug:
                     print(torch.linalg.vector_norm(last_grad))
+
+                # GRADIENT UPDATE STATE
 
                 # on the i-th step for all j < i
                 # try to update ∂𝓛/∂τ_j ← ∂𝓛/∂τ_j + ∂𝓛/∂τ_i ∂τ_i(τ_1 … τ_i-1)/∂τ_j
