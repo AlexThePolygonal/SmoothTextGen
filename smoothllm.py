@@ -11,13 +11,16 @@ from copy import deepcopy
 from tqdm import tqdm
 
 
-
 def total_grad(model: torch.nn.Module, start_dim: int = 0) -> torch.Tensor:
     """
     Get the total gradient of all the free parameters of the model
     """
     return torch.cat(
-        [torch.flatten(p.grad, start_dim=start_dim) for p in model.parameters() if p.requires_grad]
+        [
+            torch.flatten(p.grad, start_dim=start_dim)
+            for p in model.parameters()
+            if p.requires_grad
+        ]
     )
 
 
@@ -462,7 +465,9 @@ class SmoothModelForCausalLM(torch.nn.Module):
         model = self.model
         toks = input_tokens.clone()
         cache = None
-        after_eos_mask = torch.ones((toks.shape[0], toks.shape[1] + 1), dtype=bool, device=toks.device)
+        after_eos_mask = torch.ones(
+            (toks.shape[0], toks.shape[1] + 1), dtype=bool, device=toks.device
+        )
 
         for i in range(max_iters):
             with torch.no_grad():
@@ -525,7 +530,7 @@ class SmoothLoss:
         model_output: SmoothGenerationOutput
         loss = None
 
-        def __init__(self, output, loss):
+        def __init__(self, output:SmoothGenerationOutput, loss:Callable):
             self.model_output = output
             self.loss = loss
 
@@ -536,6 +541,8 @@ class SmoothLoss:
             """
             The key function of this project, efficient backprop for stacked models
             """
+            rand_state = save_random_state(self.model_output.toks.device)
+
             model = self.model_output.model
             saved_states = self.model_output.saved_states
             toks = self.model_output.toks
@@ -652,6 +659,7 @@ class SmoothLoss:
                     kv[1].requires_grad_(False)
 
             tokprobs.requires_grad_(False)
+            load_random_state(rand_state, toks.device)
 
     def __init__(self, loss):
         super().__init__()
@@ -661,19 +669,19 @@ class SmoothLoss:
         return self.LossValue(output, self.loss)
 
 
-# estimate 𝔼𝑋 and 𝔼𝑋² by sampling from rv 𝑋
-def estimate_mean(rv, iters, seed=1337):
-    set_determininsm(seed)
-    vector_norms = []
-    e_rv = None
-    for _ in tqdm(range(iters)):
-        rvi = rv()
-        vnorm = (torch.linalg.vector_norm(rvi))
-        if e_rv is None:
-            e_rv = torch.zeros_like(rvi).to(dtype=torch.float64)
-        e_rv += rvi
-        vector_norms.append(vnorm)
-    return e_rv / iters
+# # estimate 𝔼𝑋 and 𝔼𝑋² by sampling from rv 𝑋
+# def estimate_mean(rv, iters, seed=1337):
+#     set_determininsm(seed)
+#     vector_norms = []
+#     e_rv = None
+#     for _ in tqdm(range(iters)):
+#         rvi = rv()
+#         vnorm = torch.linalg.vector_norm(rvi)
+#         if e_rv is None:
+#             e_rv = torch.zeros_like(rvi).to(dtype=torch.float64)
+#         e_rv += rvi
+#         vector_norms.append(vnorm)
+#     return e_rv / iters
 
 
 # sample the model gradient from the smooth estimator
@@ -688,12 +696,19 @@ def smooth_seq_grad(model, loss, prompt, max_toks, config):
 
     return run
 
-def test_grad(eps: float, size:Sequence[int|torch.SymInt], device:torch.DeviceObjType = torch.device('cpu')):
+
+def test_grad(
+    eps: float,
+    size: Sequence[int | torch.SymInt],
+    device: torch.DeviceObjType = torch.device("cpu"),
+):
     mean = torch.randint(0, 2, size=size, dtype=torch.float32, device=device)
+
     def run():
-        return mean + (torch.rand_like(mean) - 0.5)*eps
+        return mean + (torch.rand_like(mean) - 0.5) * eps
+
     return run
-        
+
 
 # sample the model gradient from the REINFORCE estimator
 def reinforce_grad(model, loss, prompt, max_toks, cfg):
@@ -721,34 +736,42 @@ def reinforce_grad(model, loss, prompt, max_toks, cfg):
         res = total_grad(model)
         model.zero_grad(set_to_none=True)
         return res
-    
+
     return run
+
 
 def measure_avg_cosine_sim(rv, log_iters, seed=1337):
     mean = torch.zeros_like(rv())
 
+    # first compute the mean of the iters
     set_determininsm(1337)
     iters = 2**log_iters
-    for _ in range(iters):
+    for _ in tqdm(range(iters)):
         mean += rv()
     mean = mean / iters
 
-    set_determininsm(1337)
-    cosine_sims:Sequence[Sequence[torch.Tensor]] = []
-    jth_batch_storage:Sequence[torch.Tensor] = []
-    for j in tqdm(range(log_iters)):
+    # prepage the output
+    cosine_sims: Sequence[Sequence[torch.Tensor]] = []
+    jth_batch_storage: Sequence[torch.Tensor] = []
+    for j in range(log_iters):
         cosine_sims.append([])
         jth_batch_storage.append(torch.zeros_like(mean))
 
+    # regenerate the random values, computing the batch means one-by-one in one pass
+    set_determininsm(1337)
     for i in tqdm(range(iters)):
         next = rv()
         for j in range(log_iters):
             k = 2**j
             jth_batch_storage[j] += next
-            if (i % k + 1 == k):
+            if i % k + 1 == k:
                 jth_batch_storage[j] /= k
-                csim = torch.cosine_similarity(jth_batch_storage[j], mean, dim=0).to('cpu').numpy()
+                csim = (
+                    torch.cosine_similarity(jth_batch_storage[j], mean, dim=0)
+                    .to("cpu")
+                    .numpy()
+                )
                 cosine_sims[j].append(csim)
                 jth_batch_storage[j].zero_()
-    
+
     return cosine_sims, mean
