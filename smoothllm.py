@@ -530,7 +530,7 @@ class SmoothLoss:
         model_output: SmoothGenerationOutput
         loss = None
 
-        def __init__(self, output:SmoothGenerationOutput, loss:Callable):
+        def __init__(self, output: SmoothGenerationOutput, loss: Callable):
             self.model_output = output
             self.loss = loss
 
@@ -740,28 +740,35 @@ def reinforce_grad(model, loss, prompt, max_toks, cfg):
     return run
 
 
-def measure_avg_cosine_sim(rv, log_iters, seed=1337):
+def measure_avg_cosine_sim(rv : Callable, log_iters:int, seed:int=1337) -> Tuple[Sequence[Sequence[float]], torch.Tensor, torch.Tensor]:
     mean = torch.zeros_like(rv())
+    tr_cov = torch.zeros_like(mean)
 
     # first compute the mean of the iters
-    set_determininsm(1337)
+    set_determininsm(seed)
+    rand_state = save_random_state(mean.device)
+    load_random_state(rand_state, device=mean.device)
     iters = 2**log_iters
     for _ in tqdm(range(iters)):
-        mean += rv()
+        rv_val = rv()
+        mean += rv_val
+        tr_cov += rv_val**2
     mean = mean / iters
+    tr_cov = tr_cov / iters
+    tr_cov += - (mean)**2
 
     # prepage the output
     cosine_sims: Sequence[Sequence[torch.Tensor]] = []
     jth_batch_storage: Sequence[torch.Tensor] = []
-    for j in range(log_iters):
+    for j in range(log_iters + 1):
         cosine_sims.append([])
         jth_batch_storage.append(torch.zeros_like(mean))
 
     # regenerate the random values, computing the batch means one-by-one in one pass
-    set_determininsm(1337)
+    load_random_state(rand_state, device=mean.device)
     for i in tqdm(range(iters)):
         next = rv()
-        for j in range(log_iters):
+        for j in range(log_iters + 1):
             k = 2**j
             jth_batch_storage[j] += next
             if i % k + 1 == k:
@@ -774,4 +781,4 @@ def measure_avg_cosine_sim(rv, log_iters, seed=1337):
                 cosine_sims[j].append(csim)
                 jth_batch_storage[j].zero_()
 
-    return cosine_sims, mean
+    return cosine_sims, mean, tr_cov
