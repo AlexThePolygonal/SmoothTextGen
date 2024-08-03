@@ -163,3 +163,5 @@ cython_debug/
 *.tmp
 *.temp
 *.saved
+temp.ipynb
+tmp.ipynb

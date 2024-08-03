@@ -189,8 +189,6 @@ class SmoothGenerationConfig:
         do_sample: bool = True,
         temperature: float = 0.0,
         entropy_bound: float = 1.0,
-        do_clip_norms: bool = True,
-        clip_norm: float = 1.0,
         do_quit_on_eos: bool = False,
         debug: bool = False,
     ):
@@ -203,8 +201,6 @@ class SmoothGenerationConfig:
         self.do_sample = do_sample
         self.temperature = temperature
         self.entropy_bound = entropy_bound
-        self.do_clip_norms = do_clip_norms
-        self.clip_norm = clip_norm
         self.do_quit_on_eos = do_quit_on_eos
         self.debug = debug
 
@@ -219,9 +215,7 @@ class SmoothGenerationConfig:
             f"do_hard_rounding={self.do_hard_rounding}, "
             f"do_sample={self.do_sample}, "
             f"temperature={self.temperature}, "
-            f"entropy_bound={self.entropy_bound}, "
-            f"do_clip_norms={self.do_clip_norms}, "
-            f"clip_norm={self.clip_norm})"
+            f"entropy_bound={self.entropy_bound})"
         )
 
 
@@ -537,7 +531,7 @@ class SmoothLoss:
         def value(self):
             return self.loss(self.model_output.toks, self.model_output.tokprobs).item()
 
-        def backwards(self, output=None):
+        def backwards(self, do_clip_norms:bool = True, clip_norm:Optional[float] = 10., output=None):
             """
             The key function of this project, efficient backprop for stacked models
             """
@@ -629,12 +623,12 @@ class SmoothLoss:
                 last_grad = tokprobs.grad[:, i, :]
 
                 # clip the norms to avoid gradient explosion
-                if config.do_clip_norms:
+                if do_clip_norms:
                     with torch.no_grad():
                         norm = torch.linalg.vector_norm(
                             last_grad, dim=(1), keepdim=True
                         )
-                        mask = norm >= config.clip_norm
+                        mask = norm >= clip_norm
                         last_grad = torch.where(mask, last_grad / norm, last_grad)
 
                 # TRACK THIS TO UNDERSTAND GRADIENT EXPLOSION
@@ -669,27 +663,12 @@ class SmoothLoss:
         return self.LossValue(output, self.loss)
 
 
-# # estimate 𝔼𝑋 and 𝔼𝑋² by sampling from rv 𝑋
-# def estimate_mean(rv, iters, seed=1337):
-#     set_determininsm(seed)
-#     vector_norms = []
-#     e_rv = None
-#     for _ in tqdm(range(iters)):
-#         rvi = rv()
-#         vnorm = torch.linalg.vector_norm(rvi)
-#         if e_rv is None:
-#             e_rv = torch.zeros_like(rvi).to(dtype=torch.float64)
-#         e_rv += rvi
-#         vector_norms.append(vnorm)
-#     return e_rv / iters
-
-
 # sample the model gradient from the smooth estimator
-def smooth_seq_grad(model, loss, prompt, max_toks, config):
+def smooth_seq_grad(model, loss, prompt, max_toks, config, clip_norm):
     def run():
         output: SmoothGenerationOutput = model.generate(prompt, max_toks, config)
         loss_val = loss(output)
-        loss_val.backwards()
+        loss_val.backwards(clip_norm=clip_norm)
         res = total_grad(model)
         model.zero_grad(set_to_none=True)
         return res
